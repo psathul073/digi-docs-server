@@ -77,8 +77,10 @@ router.post("/add-doc", fileUpload.any(), async (req, res) => {
 router.get('/all-docs', async (req, res) => {
     try {
         const { limit = 10, lastCreatedAt, lastDocName, search = '' } = req.query;
+        const uid = req.user.uid;
 
         let queryRef = db.collection('private_docs')
+            .where('userId', '==', uid)
             .orderBy('docName')
             .orderBy('createdAt', 'desc')
             .limit(Number(limit));
@@ -282,7 +284,7 @@ router.delete("/doc-delete", async (req, res) => {
         const docRef = db.collection("private_docs").doc(docId);
         const docSnapshot = await docRef.get();
         const copyDocRef = db.collection("public_docs").doc(docId);
-        
+
         // Remove Cloudinary doc images.
         await Promise.all(
             docSnapshot.data().docFiles.map(async (file) => {
@@ -303,9 +305,9 @@ router.delete("/doc-delete", async (req, res) => {
         await docRef.delete();
         await copyDocRef.delete();
 
-        res.status(200).json({type: true, message: "Document is deleted!"})
-        
-        
+        res.status(200).json({ type: true, message: "Document is deleted!" })
+
+
     } catch (error) {
         console.log("Doc delete error,", error);
         res.status(500).json({ type: false, message: "Server Error!" });
