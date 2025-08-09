@@ -1,7 +1,7 @@
 import express, { json } from 'express';
 import admin from '../config/firebase.js';
 import multer from 'multer';
-import cloudinary from '../Config/cloudinary.js';
+import cloudinary from '../config/cloudinary.js';
 import fs from 'fs';
 
 const router = express.Router();
