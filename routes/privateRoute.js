@@ -32,7 +32,8 @@ router.post("/add-doc", fileUpload.any(), async (req, res) => {
                 const result = await cloudinary.uploader.upload(file.path, { folder: "docImages" });
 
                 // Delete temp file.
-                fs.unlinkSync(file.path);
+                try { fs.unlinkSync(file.path); }
+                catch (err) { console.error("File delete failed:", err); }
 
                 // Upload file data...
                 return {
@@ -204,10 +205,25 @@ router.post("/doc-update", fileUpload.any(), async (req, res) => {
 
         const { docId } = req.query;
         const { docName } = req.body;
+        const uid = req.user.uid;
 
         const docRef = db.collection("private_docs").doc(docId);
-        const copyDocRef = db.collection("public_docs").doc(docId);
         const docSnapshot = await docRef.get();
+        const copyDocRef = db.collection("public_docs").doc(docId);
+        const copyDocSnapshot = await copyDocRef.get();
+
+        // User validate.
+        if (
+            (docSnapshot.exists && docSnapshot.data().userId !== uid) &&
+            (copyDocSnapshot.exists && copyDocSnapshot.data().userId !== uid)
+        ) {
+            req.files.forEach((file) => {
+                try { fs.unlinkSync(file.path); }
+                catch (err) { console.error("File delete failed:", err); }
+            });
+
+            return res.json({ type: false, message: "You can only update your own documents!" });
+        }
 
         // Remove Cloudinary old doc images.
         await Promise.all(
@@ -259,8 +275,6 @@ router.post("/doc-update", fileUpload.any(), async (req, res) => {
         });
 
         // Update public doc if exists.
-        const copyDocSnapshot = await copyDocRef.get();
-
         if (copyDocSnapshot.exists) {
             copyDocRef.update({
                 docName,
@@ -281,9 +295,25 @@ router.post("/doc-update", fileUpload.any(), async (req, res) => {
 router.delete("/doc-delete", async (req, res) => {
     try {
         const { docId } = req.query;
+        const uid = req.user.uid;
+
         const docRef = db.collection("private_docs").doc(docId);
         const docSnapshot = await docRef.get();
         const copyDocRef = db.collection("public_docs").doc(docId);
+        const copyDocSnapshot = await copyDocRef.get();
+
+        // User validate.
+        if (
+            (docSnapshot.exists && docSnapshot.data().userId !== uid) &&
+            (copyDocSnapshot.exists && copyDocSnapshot.data().userId !== uid)
+        ) {
+            req.files.forEach((file) => {
+                try { fs.unlinkSync(file.path); }
+                catch (err) { console.error("File delete failed:", err); }
+            });
+
+            return res.json({ type: false, message: "You can only delete your own documents!" });
+        }
 
         // Remove Cloudinary doc images.
         await Promise.all(
