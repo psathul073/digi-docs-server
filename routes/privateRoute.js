@@ -1,0 +1,306 @@
+import express, { json } from 'express';
+import admin from '../config/firebase.js';
+import multer from 'multer';
+import cloudinary from '../Config/cloudinary.js';
+import fs from 'fs';
+
+const router = express.Router();
+const db = admin.firestore();
+db.settings({ ignoreUndefinedProperties: true }); // To prevents firestore undefined situation.
+
+// Multer setup for temp memory storage.
+const fileUpload = multer({ dest: 'temp/files' });
+
+// Add documents ✅
+router.post("/add-doc", fileUpload.any(), async (req, res) => {
+    try {
+
+        const uid = req.user.uid;
+        const { docName } = req.body;
+
+        // Check user already upload this doc.
+        const docQuery = await db.collection("private_docs").where("userId", "==", uid).where("docName", "==", docName).get()
+
+        // If no upload doc.
+        if (docQuery.empty) {
+
+            let docFiles;
+
+            // Cloudinary uploads...
+            const uploadPromises = req.files.map(async (file) => {
+
+                const result = await cloudinary.uploader.upload(file.path, { folder: "docImages" });
+
+                // Delete temp file.
+                fs.unlinkSync(file.path);
+
+                // Upload file data...
+                return {
+                    public_id: result.public_id,
+                    url: result.secure_url,
+                    fieldname: file.fieldname,
+                };
+
+            });
+
+            try {
+                const uploadedFiles = await Promise.all(uploadPromises);
+                console.log("Cloudinary file uploaded ✅");
+                docFiles = uploadedFiles; // Add files array.
+
+            } catch (error) {
+                console.error("Cloudinary file upload error:", err);
+            };
+
+            // Upload data.
+            await db.collection("private_docs").add({
+                userId: uid,
+                docName,
+                docFiles,
+                isPublic: false,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+
+            res.status(200).json({ type: true, message: "Upload Successful!" })
+
+        } else {
+            res.json({ type: true, message: "Document is already added!" });
+        }
+
+    } catch (error) {
+        console.log("Add doc error,", error);
+        res.status(500).json({ type: false, message: "Server Error!" })
+    }
+});
+
+// Fetch all documents ✅
+router.get('/all-docs', async (req, res) => {
+    try {
+        const { limit = 10, lastCreatedAt, lastDocName, search = '' } = req.query;
+
+        let queryRef = db.collection('private_docs')
+            .orderBy('docName')
+            .orderBy('createdAt', 'desc')
+            .limit(Number(limit));
+
+        if (search) {
+            queryRef = queryRef
+                .where('docName', '>=', search)
+                .where('docName', '<=', search + '\uf8ff');
+        }
+
+        if (lastCreatedAt && lastDocName) {
+            const lastTimestamp = admin.firestore.Timestamp.fromMillis(Number(lastCreatedAt));
+            queryRef = queryRef.startAfter(lastDocName, lastTimestamp);
+        }
+
+        const snapshot = await queryRef.get();
+
+        const docs = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+        }));
+
+        const lastVisible = snapshot.docs[snapshot.docs.length - 1];
+
+        res.json({
+            docs,
+            nextCursor: lastVisible
+                ? {
+                    createdAt: lastVisible.data().createdAt.toMillis(),
+                    docName: lastVisible.data().docName
+                }
+                : null,
+            hasMore: snapshot.docs.length === Number(limit),
+        });
+
+
+    } catch (error) {
+        console.log("Fetch all docs error,", error);
+        res.status(500).json({ type: false, message: "Server Error!" });
+    }
+
+});
+
+// Document to public ✅
+router.post("/doc-to-public", async (req, res) => {
+    try {
+        const { docId } = req.query;
+        const uid = req.user.uid;
+        const privateDocSnapshot = await db.collection('private_docs').doc(docId).get();
+        const privateDoc = privateDocSnapshot.data();
+
+        const publicDocSnapshot = await db.collection('public_docs').doc(docId).get();
+        if (privateDocSnapshot.exists && !publicDocSnapshot.exists) {
+
+            if (privateDoc.userId !== uid) return json({ type: false, message: "You can only share your own documents." });
+
+            await db.collection('private_docs').doc(docId).set({
+                isPublic: true,
+            }, { merge: true });
+
+            await db.collection('public_docs').doc(docId).create({
+                ...privateDoc,
+                sharedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+
+            res.status(200).json({ type: true, message: " Document shared publicly!" });
+
+        } else {
+            res.json({ type: true, message: "Already shared to public!" })
+        }
+
+    } catch (error) {
+        console.log("Doc to public error,", error);
+        res.status(500).json({ type: false, message: "Server Error!" });
+    }
+});
+
+// Document to private ✅
+router.patch("/doc-to-private", async (req, res) => {
+    try {
+        const { docId } = req.query;
+        const uid = req.user.uid;
+
+        const publicDocSnapshot = await db.collection('public_docs').doc(docId).get();
+        const publicDoc = publicDocSnapshot.data();
+
+        if (publicDocSnapshot.exists) {
+
+            if (publicDoc.userId !== uid) return json({ type: false, message: "You can only make your own documents private." });
+
+            await db.collection('private_docs').doc(docId).set({
+                isPublic: false,
+            }, { merge: true });
+
+            await db.collection('public_docs').doc(docId).delete();
+
+            res.status(200).json({ type: true, message: "The document is now private." });
+
+        } else {
+            res.json({ type: true, message: "No document exist!" })
+        }
+
+    } catch (error) {
+        console.log("Doc to private error,", error);
+        res.status(500).json({ type: false, message: "Server Error!" });
+    }
+});
+
+// Document update ✅
+router.post("/doc-update", fileUpload.any(), async (req, res) => {
+    try {
+
+        const { docId } = req.query;
+        const { docName } = req.body;
+
+        const docRef = db.collection("private_docs").doc(docId);
+        const copyDocRef = db.collection("public_docs").doc(docId);
+        const docSnapshot = await docRef.get();
+
+        // Remove Cloudinary old doc images.
+        await Promise.all(
+            docSnapshot.data().docFiles.map(async (file) => {
+                try {
+                    if (file?.public_id) {
+                        await cloudinary.uploader.destroy(file.public_id);
+                        console.log(`✅ Deleted: ${file.public_id}`);
+                    } else {
+                        console.warn("⚠️ Skipped: Missing public_id in file", file);
+                    }
+                } catch (err) {
+                    console.error(`❌ Failed to delete ${file?.public_id}:`, err.message);
+                }
+            })
+        );
+
+        // Upload new doc images.
+        let docFiles;
+        // Cloudinary uploads...
+        const uploadPromises = req.files.map(async (file) => {
+
+            const result = await cloudinary.uploader.upload(file.path, { folder: "docImages" });
+            // Delete temp file.
+            fs.unlinkSync(file.path);
+
+            // Upload file data...
+            return {
+                public_id: result.public_id,
+                url: result.secure_url,
+                fieldname: file.fieldname,
+            };
+
+        });
+
+        try {
+            const uploadedFiles = await Promise.all(uploadPromises);
+            console.log("Cloudinary new image uploaded ✅");
+            docFiles = uploadedFiles; // Add files array.
+
+        } catch (error) {
+            console.error("Cloudinary image upload error:", err);
+        };
+
+        // Update private doc.
+        await docRef.update({
+            docName,
+            docFiles,
+        });
+
+        // Update public doc if exists.
+        const copyDocSnapshot = await copyDocRef.get();
+
+        if (copyDocSnapshot.exists) {
+            copyDocRef.update({
+                docName,
+                docFiles,
+            })
+        }
+
+        res.status(200).json({ type: true, message: "Document update successful !" });
+
+
+    } catch (error) {
+        console.log("Doc update error,", error);
+        res.status(500).json({ type: false, message: "Server Error!" });
+    }
+});
+
+// Document delete ✅
+router.delete("/doc-delete", async (req, res) => {
+    try {
+        const { docId } = req.query;
+        const docRef = db.collection("private_docs").doc(docId);
+        const docSnapshot = await docRef.get();
+        const copyDocRef = db.collection("public_docs").doc(docId);
+        
+        // Remove Cloudinary doc images.
+        await Promise.all(
+            docSnapshot.data().docFiles.map(async (file) => {
+                try {
+                    if (file?.public_id) {
+                        await cloudinary.uploader.destroy(file.public_id);
+                        console.log(`✅ Deleted: ${file.public_id}`);
+                    } else {
+                        console.warn("⚠️ Skipped: Missing public_id in file", file);
+                    }
+                } catch (err) {
+                    console.error(`❌ Failed to delete ${file?.public_id}:`, err.message);
+                }
+            })
+        );
+
+        // Delete docs.
+        await docRef.delete();
+        await copyDocRef.delete();
+
+        res.status(200).json({type: true, message: "Document is deleted!"})
+        
+        
+    } catch (error) {
+        console.log("Doc delete error,", error);
+        res.status(500).json({ type: false, message: "Server Error!" });
+    }
+});
+
+export default router;
