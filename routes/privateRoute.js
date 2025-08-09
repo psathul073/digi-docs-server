@@ -126,65 +126,74 @@ router.get('/all-docs', async (req, res) => {
 router.post("/doc-to-public", async (req, res) => {
     try {
         const { docId } = req.query;
-        const uid = req.user.uid;
+        const uid = req.user?.uid;
+
+        if (!docId || !uid) {
+            return res.status(400).json({ type: false, message: "Missing docId or user ID." });
+        }
+
         const privateDocSnapshot = await db.collection('private_docs').doc(docId).get();
-        const privateDoc = privateDocSnapshot.data();
-
         const publicDocSnapshot = await db.collection('public_docs').doc(docId).get();
+
         if (privateDocSnapshot.exists && !publicDocSnapshot.exists) {
+            const privateDoc = privateDocSnapshot.data();
 
-            if (privateDoc.userId !== uid) return json({ type: false, message: "You can only share your own documents." });
+            if (privateDoc.userId !== uid) {
+                return res.json({ type: false, message: "You can only share your own documents." });
+            }
 
-            await db.collection('private_docs').doc(docId).set({
-                isPublic: true,
-            }, { merge: true });
+            await db.collection('private_docs').doc(docId).set({ isPublic: true }, { merge: true });
 
-            await db.collection('public_docs').doc(docId).create({
+            await db.collection('public_docs').doc(docId).set({
                 ...privateDoc,
                 sharedAt: admin.firestore.FieldValue.serverTimestamp(),
             });
 
-            res.status(200).json({ type: true, message: " Document shared publicly!" });
+            return res.status(200).json({ type: true, message: "Document shared publicly!" });
 
         } else {
-            res.json({ type: true, message: "Already shared to public!" })
+            return res.json({ type: true, message: "Already shared to public!" });
         }
 
     } catch (error) {
         console.log("Doc to public error,", error);
-        res.status(500).json({ type: false, message: "Server Error!" });
+        return res.status(500).json({ type: false, message: "Server Error!" });
     }
+
 });
 
 // Document to private ✅
 router.patch("/doc-to-private", async (req, res) => {
     try {
         const { docId } = req.query;
-        const uid = req.user.uid;
+        const uid = req.user?.uid;
+
+        if (!docId || !uid) {
+            return res.status(400).json({ type: false, message: "Missing docId or user UID." });
+        }
 
         const publicDocSnapshot = await db.collection('public_docs').doc(docId).get();
+
+        if (!publicDocSnapshot.exists) {
+            return res.json({ type: true, message: "No document exists!" });
+        }
+
         const publicDoc = publicDocSnapshot.data();
 
-        if (publicDocSnapshot.exists) {
-
-            if (publicDoc.userId !== uid) return json({ type: false, message: "You can only make your own documents private." });
-
-            await db.collection('private_docs').doc(docId).set({
-                isPublic: false,
-            }, { merge: true });
-
-            await db.collection('public_docs').doc(docId).delete();
-
-            res.status(200).json({ type: true, message: "The document is now private." });
-
-        } else {
-            res.json({ type: true, message: "No document exist!" })
+        if (publicDoc.userId !== uid) {
+            return res.json({ type: false, message: "You can only make your own documents private." });
         }
+
+        await db.collection('private_docs').doc(docId).set({ isPublic: false }, { merge: true });
+        await db.collection('public_docs').doc(docId).delete();
+
+        return res.status(200).json({ type: true, message: "The document is now private." });
 
     } catch (error) {
         console.log("Doc to private error,", error);
-        res.status(500).json({ type: false, message: "Server Error!" });
+        return res.status(500).json({ type: false, message: "Server Error!" });
     }
+
 });
 
 // Document update ✅
